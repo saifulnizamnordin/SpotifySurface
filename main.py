@@ -404,7 +404,7 @@ def create_rectangle(x1, y1, x2, y2):
 def update_synced_lyrics(lyrics, duration):  # sourcery skip: low-code-quality
     global selected_lyric_line, rectangle_created, rectangle_status, rectangle, original_rect, rect_x1, rect_y1, rect_x2, rect_y2, target_x1, target_y1, target_x2, target_y2
     global automatic_scroll, previous_auto_scroll_fraction
-    
+
     lyric_sync_buffer = -50  # Buffer in ms. Negative for earlier, positive for later.
     duration = duration - lyric_sync_buffer
 
@@ -458,7 +458,7 @@ def update_synced_lyrics(lyrics, duration):  # sourcery skip: low-code-quality
                     print("Lyrics jumped, teleporting rectangle")
                     rectangle_status = "teleporting"
 
-                print(f"New lyric hover: \"{lyrics[index][1]}\"")
+                print(f"New lyric hover: \033[92m\"{lyrics[index][1]}\"\033[0m")
                 print(f"New lyric time range: {lyrics[index][0]}")
 
                 selected_lyric_line = index

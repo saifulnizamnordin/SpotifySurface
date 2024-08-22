@@ -82,7 +82,6 @@ The window can be dragged and resized like a normal window, but when dragging th
 <br>
 
 ## Setup
-
 #### Tokens and Environment Variables
 The following 3 tokens can be put into an environment variable.
 
@@ -90,8 +89,8 @@ To do this, create a file named `.env` in your folder containing the `main.py` f
 
 In the file, enter the following, replacing `<TOKEN>` with your respective token.
 ```
-SPOTIFY_REFRESH_TOKEN=<TOKEN>
-SPOTIFY_BASE64_TOKEN=<TOKEN>
+SPOTIFY_REFRESH_TOKEN=<TOKEN> # refresh_token
+SPOTIFY_BASE64_TOKEN=<TOKEN> # base64_encde(client_id:client_secret)
 MUSIXMATCH_TOKEN=<TOKEN>
 ```
 <br>
@@ -102,6 +101,33 @@ You will only need to save 2 tokens from this video:
  * <strong>Spotify Refresh Token</strong> (14:25)
  * <strong>Spotify Base64 Token</strong> (10:50)
 <br><br>
+
+*reference*
+Go to Spotify Developer [Dashboard](https://developer.spotify.com/dashboard).
+Click "Create an App."
+Fill in the App name, App description, and **Redirect URIs** fields. Tick the boxes for Web API and Understand.
+Tick the box to agree to Spotify's TOS and Design Guidelines.
+After that, inside the app's dashboard, click on Settings.
+In the Basic Information tab, copy the **Client ID**.
+Click View client secret to copy.
+```
+client_id=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+client_secret=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+Visit this link and replace all the required values.
+```
+https://accounts.spotify.com/authorize?client_id={client_id}}&response_type=code&redirect_uri={url_encode(Redirect URIs)}&scope=playlist-modify-public%20playlist-modify-private%20user-modify-playback-state%20user-read-playback-state%20user-modify-playback-state
+```
+After authorizing and agreeing, you will see a URL like `https://your-redirect-uris.com/?code=xxxxxxx`. Copy the **code** from the URL.
+![](/screenshots/spotify.png)
+```
+code=xxxxxxx...
+```
+Now run this curl command and replace all the required values.
+```
+curl -H "Authorization: Basic {base64_encode(client_id:client_secret)}" -d grant_type=authorization_code -d code={code} -d redirect_uri={url_encode(Redirect URIs)} https://accounts.spotify.com/api/token
+```
+Once complete curl command, turn json response. Please copy value of `refresh_token`
 
 #### Musixmatch Token
 You may remove the `MUSIXMATCH_TOKEN` variable from the `.env` file if you do not have a Musixmatch token.<br>
