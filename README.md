@@ -218,7 +218,8 @@ pip install -r requirements-dev.txt
 pytest
 ```
 The tests mock Spotify, LRCLIB, Musixmatch and the OS media tools, so no tokens or running Spotify app are needed.
-GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs them on Windows, macOS and Linux for every push and pull request.
+GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs them on Windows and Linux for every pull request and push to `master`.
+macOS has no CI runner (GitHub's macOS runners are scarce and queue for a long time); its code paths are tested on the other runners with mocked `osascript`/`pgrep`.
 <br>
 
 ---
