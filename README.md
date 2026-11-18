@@ -30,9 +30,13 @@
       <ul>
         <li><a href="#tokens-and-environment-variables">Tokens and Environment Variables</a></li>
         <li><a href="#spotify-tokens">Spotify Tokens</a></li>
+        <li><a href="#lyrics-sources">Lyrics Sources</a></li>
         <li><a href="#musixmatch-token">Musixmatch Token</a></li>
       </ul>
     </li>
+    <li><a href="#running">Running</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#running-the-tests">Running the Tests</a></li>
     <li><a href="#acknowledgments-and-credits">Acknowledgments and Credits</a></li>
     <li><a href="#developer">Developer</a></li>
     <li><a href="#license">License</a></li>
@@ -64,7 +68,7 @@ The application searches for lyrics immediately after you change songs on Spotif
 
 <strong>Quick Access Controls *</strong><br>
 With the quick access controls, you can play/pause, skip, return, shuffle, and repeat songs with the click of a singular button.<br>
-&ast; Note that some of these functions require Spotify Premium to work. If you do not have Spotify Premium, the play/pause, skip, and return buttons will attempt to skip directly from the device. This function will only work on Windows machines.<br>
+&ast; Note that some of these functions require Spotify Premium to work. If you do not have Spotify Premium, the play/pause, skip, and return buttons will control the Spotify app directly when it is playing on the same computer (Windows: media keys, macOS: AppleScript, Linux: `playerctl`).<br>
 <img src="https://i.imgur.com/3fp5ObV.gif" alt="Quick Access Controls Demo" height=200>
 
 <strong>Window Dragging, Resize, and Alignment Lock</strong><br>
@@ -76,72 +80,152 @@ The window can be dragged and resized like a normal window, but when dragging th
 ---
 
 ## Installation/Downloading
+Requirements:
+* **Windows 10/11, macOS or Linux**
+* **Python 3.10** (the version the pinned dependencies and CI tests use)
+* A Spotify account (some playback controls need Spotify Premium, see above)
+
+Steps:
 * Clone or download this repo
 * Install the required dependencies with pip command:
 ```pip install -r requirements.txt```
+(`pywin32` and `winsdk` are installed on Windows only.)
+
+Extra steps per platform:
+
+| Platform | Notes |
+|---|---|
+| Windows | Nothing extra. |
+| macOS | Use the Python from [python.org](https://www.python.org/downloads/) or `brew install python-tk@3.10` so Tkinter is included. The first time you use the playback buttons without Premium, macOS asks to allow your terminal to control Spotify - click **OK**. |
+| Linux | Install Tkinter, e.g. `sudo apt install python3-tk`. For playback buttons without Premium, install `playerctl` (`sudo apt install playerctl`). |
 <br>
 
 ## Setup
 #### Tokens and Environment Variables
-The following 3 tokens can be put into an environment variable.
+The tokens below are read from environment variables.
 
 To do this, create a file named `.env` in your folder containing the `main.py` file.
 
 In the file, enter the following, replacing `<TOKEN>` with your respective token.
 ```
-SPOTIFY_REFRESH_TOKEN=<TOKEN> # refresh_token
-SPOTIFY_BASE64_TOKEN=<TOKEN> # base64_encde(client_id:client_secret)
-MUSIXMATCH_TOKEN=<TOKEN>
+SPOTIFY_REFRESH_TOKEN=<TOKEN>   # refresh_token
+SPOTIFY_BASE64_TOKEN=<TOKEN>    # base64_encode(client_id:client_secret)
+MUSIXMATCH_TOKEN=<TOKEN>        # optional, see "Musixmatch Token"
 ```
+`.env` is listed in `.gitignore` - never commit it, it contains your Spotify client secret.
 <br>
 
 #### Spotify Tokens
-Follow [this Youtube video](https://youtu.be/-FsFT6OwE1A?t=83) from 1:22 to 14:32.<br>
-You will only need to save 2 tokens from this video:
- * <strong>Spotify Refresh Token</strong> (14:25)
- * <strong>Spotify Base64 Token</strong> (10:50)
-<br><br>
+**1. Create a Spotify app**
+* Go to the Spotify Developer [Dashboard](https://developer.spotify.com/dashboard) and click **Create app**.
+* Fill in the App name and App description.
+* Under **Redirect URIs** add exactly `http://127.0.0.1:8888/callback`.<br>
+  Spotify no longer accepts `localhost` - use `127.0.0.1`. No trailing slash.
+* Tick **Web API**, agree to the terms and save.
+* Open the app's **Settings**. Copy the **Client ID** and click **View client secret** to copy the **Client Secret**.
 
-*reference*
-Go to Spotify Developer [Dashboard](https://developer.spotify.com/dashboard).
-Click "Create an App."
-Fill in the App name, App description, and **Redirect URIs** fields. Tick the boxes for Web API and Understand.
-Tick the box to agree to Spotify's TOS and Design Guidelines.
-After that, inside the app's dashboard, click on Settings.
-In the Basic Information tab, copy the **Client ID**.
-Click View client secret to copy.
+**2. Create `SPOTIFY_BASE64_TOKEN`**
+
+This is `client_id:client_secret` encoded in Base64. In PowerShell:
+```powershell
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("<client_id>:<client_secret>"))
 ```
-client_id=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-client_secret=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Put the output into `SPOTIFY_BASE64_TOKEN=` in `.env`.
+
+> If you have several Spotify apps, make sure the Client ID you encode belongs to the app whose Redirect URIs you set up.
+> A Redirect URI added to a different app gives `INVALID_CLIENT: Invalid redirect URI` / `redirect_uri: Not matching configuration`.
+
+**3. Get `SPOTIFY_REFRESH_TOKEN` (automatic)**
+
+With `SPOTIFY_BASE64_TOKEN` saved in `.env`, run:
 ```
-Visit this link and replace all the required values.
+python get_refresh_token.py
 ```
-https://accounts.spotify.com/authorize?client_id={client_id}}&response_type=code&redirect_uri={url_encode(Redirect URIs)}&scope=playlist-modify-public%20playlist-modify-private%20user-modify-playback-state%20user-read-playback-state%20user-modify-playback-state
+A browser tab opens. Log in and approve, and the script saves the new refresh token into `.env` for you.
+
+To use a different redirect URI that is already registered on your app, pass it as an argument:
 ```
-After authorizing and agreeing, you will see a URL like `https://your-redirect-uris.com/?code=xxxxxxx`. Copy the **code** from the URL.
-![](/screenshots/spotify.png)
+python get_refresh_token.py https://your-redirect-uri.example
 ```
-code=xxxxxxx...
+For a non-`127.0.0.1` redirect, the script asks you to paste the URL your browser lands on after approving.
+
+**Refresh tokens expire.** The dashboard shows "Refresh Token Lifetime: 180 days", and Spotify may also revoke a token earlier
+(e.g. if you remove the app's access or reset the client secret). When that happens, `main.py` stops with
+`Spotify token refresh failed: Refresh token revoked` - just run `python get_refresh_token.py` again.
+
+<details>
+  <summary>Manual method (without the script)</summary>
+
+Visit this link, replacing `{client_id}` and `{redirect_uri}` (URL-encoded):
 ```
-Now run this curl command and replace all the required values.
+https://accounts.spotify.com/authorize?client_id={client_id}&response_type=code&redirect_uri={redirect_uri}&scope=playlist-modify-public%20playlist-modify-private%20user-modify-playback-state%20user-read-playback-state
 ```
-curl -H "Authorization: Basic {base64_encode(client_id:client_secret)}" -d grant_type=authorization_code -d code={code} -d redirect_uri={url_encode(Redirect URIs)} https://accounts.spotify.com/api/token
+After authorizing and agreeing, you will see a URL like `https://your-redirect-uri/?code=xxxxxxx`. Copy the **code** from the URL.
+
+Now run this curl command and replace all the required values:
 ```
-Once complete curl command, turn json response. Please copy value of `refresh_token`
+curl -H "Authorization: Basic {SPOTIFY_BASE64_TOKEN}" -d grant_type=authorization_code -d code={code} -d redirect_uri={redirect_uri} https://accounts.spotify.com/api/token
+```
+Copy the value of `refresh_token` from the JSON response into `SPOTIFY_REFRESH_TOKEN=` in `.env`.
+The code can only be used once and expires after a few minutes.
+</details>
+<br>
+
+#### Lyrics Sources
+Lyrics are looked up in this order:
+1. **[LRCLIB](https://lrclib.net)** - free and open, no token needed. Matched by artist, title, album and song length. Provides synced and plain lyrics.
+2. **Musixmatch** - only used when LRCLIB has no lyrics for the song. Needs a working token (see below).
+
+If Musixmatch returns a different song than the one playing, the result is ignored and a warning is printed.
+This protects against a blocked Musixmatch token, which returns a fake song with gibberish lyrics instead of an error.
+<br>
 
 #### Musixmatch Token
-You may remove the `MUSIXMATCH_TOKEN` variable from the `.env` file if you do not have a Musixmatch token.<br>
+The Musixmatch token is **optional** - LRCLIB is used first. You may remove the `MUSIXMATCH_TOKEN` variable from the `.env` file if you do not have a Musixmatch token.<br>
 Do not leave the variable unfilled.
 
-Keep in mind that the default token provided may not work 100% of the time and is likely rate limited.
+Keep in mind that the default token provided may not work 100% of the time and is likely rate limited or blocked.
 
 In order to get a new Musixmatch token, follow steps 1 - 5 with the guide [here](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work).
 <br><br>
 
 ---
 
+## Running
+Start Spotify and play a song, then run:
+```
+python main.py
+```
+The window shows the current song and its lyrics. Window position and settings are saved to `api_data.json` (created automatically, ignored by git).
+<br>
+
+## Troubleshooting
+| Problem | Cause / Fix |
+|---|---|
+| `Spotify token refresh failed: Refresh token revoked` (or `invalid_grant`) | The refresh token expired or was revoked. Run `python get_refresh_token.py`. |
+| `Spotify token refresh failed: Invalid client` | `SPOTIFY_BASE64_TOKEN` is wrong or the client secret was reset. Rebuild it (Setup step 2). |
+| Browser shows `redirect_uri: Not matching configuration` | The redirect URI is not registered on **the app whose Client ID is in `SPOTIFY_BASE64_TOKEN`**. Add it to that app and click **Save**. |
+| Lyrics are gibberish or belong to another song | Old versions used a blocked Musixmatch token. Update to the current version (LRCLIB first + song check), or get a new Musixmatch token. |
+| `Failed to find song` / no lyrics shown | The song isn't on LRCLIB and Musixmatch failed. Try again later or get a new Musixmatch token. |
+| App works for you but not for others | New Spotify apps are in **Development mode**: only users added under the app's **User Management** tab can log in. |
+| Linux: play/pause/skip do nothing without Premium | Install `playerctl` and check `playerctl --player=spotify status` works. |
+| Linux: `ModuleNotFoundError: No module named 'tkinter'` | `sudo apt install python3-tk` (or your distro's equivalent). |
+<br>
+
+## Running the Tests
+```
+pip install -r requirements-dev.txt
+pytest
+```
+The tests mock Spotify, LRCLIB, Musixmatch and the OS media tools, so no tokens or running Spotify app are needed.
+GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs them on Windows, macOS and Linux for every push and pull request.
+<br>
+
+---
+
 ## Acknowledgments and Credits
 * [`MxLRC` by fashni](https://github.com/fashni/MxLRC)
+* [LRCLIB](https://lrclib.net/)
 * [Musixmatch](https://www.musixmatch.com/)
 <br>
 
