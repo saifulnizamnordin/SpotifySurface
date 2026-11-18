@@ -1,10 +1,11 @@
-import asyncio
 import contextlib
 import datetime
 import json
 import math
 import multiprocessing
 import os
+import re
+import sys
 import time
 import tkinter as tk
 import tkinter.font as tk_font
@@ -15,16 +16,22 @@ from tkinter import ttk
 
 import requests
 import sv_ttk
-import win32api
-import win32con
 from PIL import Image, ImageTk
 from dotenv import load_dotenv
 from screeninfo import get_monitors
-from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as MediaManager
+
+import platform_support
 
 
 def get_lyrics(song):
     print(f"Searching song: {song}")
+    print("Trying LRCLIB...")
+    lrclib_result = get_lyrics_lrclib(song)
+    if lrclib_result is not None:
+        print("Lyrics found on LRCLIB")
+        return lrclib_result
+
+    print("Not on LRCLIB, trying Musixmatch...")
     try:
         body = find_lyrics(song)
     except KeyError:  # Unknown cause. API returns invalid?
@@ -32,7 +39,13 @@ def get_lyrics(song):
     if body is None:
         print("Failed to find song")
         return None
+    requested_artist, requested_title = song.artist, song.title
     song.update_info(body)
+    if not is_same_song(requested_artist, requested_title, song.artist, song.title):
+        # A blocked/rate-limited Musixmatch token returns a decoy song with fake lyrics
+        print(f"\033[91mMusixmatch returned a different song ({song}) - ignoring. "
+              f"Your MUSIXMATCH_TOKEN is probably blocked.\033[0m")
+        return None
     print("Song found")
 
     print(f"Searching lyrics: {song}")
@@ -136,57 +149,103 @@ def get_synced_lyrics(song, body):
         subtitle = subtitle_body["subtitle_list"][0]["subtitle"]
         if not subtitle:
             return None
-        old_lyric_lines = subtitle["subtitle_body"].split("\n")
-
-        # Remove double instrumental sections
-        previous_line_lyrics = None
-        lyric_lines = []
-        for line in old_lyric_lines:
-            if line.split("]")[1].strip() == "" and previous_line_lyrics == "":
-                pass
-            else:
-                lyric_lines.append(line.strip())
-                previous_line_lyrics = line.split("]")[1].strip()
-
-        def timestamp_to_epoch(timestamp):  # 00:00.00 str
-            epoch = 0
-            epoch += int(timestamp.split(":")[0]) * 60000
-            epoch += int(timestamp.split(":")[1].split(".")[0]) * 1000
-            epoch += int(timestamp.split(".")[1]) * 10
-            return epoch
-
-        synced_lyrics = []
-        # Add blank line from 0 to first line
-        first_line_epoch = timestamp_to_epoch(lyric_lines[0].split("] ")[0].replace("[", "").strip())
-        if first_line_epoch != 0:  # If first line does not start at 0
-            synced_lyrics.append([[0, first_line_epoch], ""])
-
-        # Append all lines
-        for index, line in enumerate(lyric_lines):
-            # Lyric Start Epoch
-            lyric_start = timestamp_to_epoch(line.split("]")[0].replace("[", ""))
-
-            # Lyric End Epoch
-            if index + 1 == len(lyric_lines):  # If iterating over last item in list
-                lyric_end = song.get_info()["duration"]
-            else:
-                lyric_end = timestamp_to_epoch(lyric_lines[index + 1].split("]")[0].replace("[", ""))
-
-            # Lyrics Line String
-            if line.split("]")[1] == "":  # Current line is empty / is an instrumental section
-                lyric = ""  # or "♪"
-            else:
-                lyric = line.split("] ")[1]
-
-            synced_lyrics.append([[lyric_start, lyric_end], lyric])
-
-        # Add blank line to end if not already existent
-        if synced_lyrics[-1][1] != "":
-            print(synced_lyrics[-1][0][1])
-            synced_lyrics.append([[synced_lyrics[-1][0][1], song.get_info()["duration"]], ""])
+        synced_lyrics = parse_lrc(subtitle["subtitle_body"], song.duration)
     else:
         return None
     return synced_lyrics
+
+
+def parse_lrc(lrc_text, duration):
+    """Convert LRC text ("[mm:ss.xx] text" per line) into [[[start_ms, end_ms], text], ...]."""
+    # The space after "]" is optional; lines that don't match (e.g. [ar:...] tags) are skipped
+    parsed_lines = []
+    for line in lrc_text.split("\n"):
+        match = re.match(r"^\s*\[(\d+):(\d+)(?:[.:](\d+))?\]\s*(.*)$", line)
+        if not match:
+            continue
+        minutes, seconds, fraction, text = match.groups()
+        epoch = int(minutes) * 60000 + int(seconds) * 1000
+        if fraction:
+            epoch += int(fraction.ljust(3, "0")[:3])  # "5" -> 500ms, "50" -> 500ms, "500" -> 500ms
+        parsed_lines.append((epoch, text.strip()))
+
+    # Remove double instrumental sections
+    lyric_lines = []
+    for epoch, text in parsed_lines:
+        if text == "" and lyric_lines and lyric_lines[-1][1] == "":
+            continue
+        lyric_lines.append((epoch, text))
+
+    if not lyric_lines:
+        return None
+
+    synced_lyrics = []
+    # Add blank line from 0 to first line
+    if lyric_lines[0][0] != 0:  # If first line does not start at 0
+        synced_lyrics.append([[0, lyric_lines[0][0]], ""])
+
+    # Append all lines
+    for index, (lyric_start, lyric) in enumerate(lyric_lines):
+        if index + 1 == len(lyric_lines):  # If iterating over last item in list
+            lyric_end = max(duration, lyric_start)
+        else:
+            lyric_end = lyric_lines[index + 1][0]
+        synced_lyrics.append([[lyric_start, lyric_end], lyric])  # "" = instrumental section
+
+    # Add blank line to end if not already existent
+    if synced_lyrics[-1][1] != "":
+        synced_lyrics.append([[synced_lyrics[-1][0][1], max(duration, synced_lyrics[-1][0][1])], ""])
+    return synced_lyrics
+
+
+def get_lyrics_lrclib(song):
+    """Look up lyrics on LRCLIB (https://lrclib.net) - free, no token needed. Returns get_lyrics()-style dict or None."""
+    headers = {"User-Agent": "SpotifySurface (lyrics display)"}
+    params = {"artist_name": song.artist, "track_name": song.title}
+    if song.album:
+        params["album_name"] = song.album
+    if song.duration:
+        params["duration"] = round(song.duration / 1000)
+
+    try:
+        response = requests.get("https://lrclib.net/api/get", params=params, headers=headers, timeout=10)
+        record = response.json() if response.status_code == 200 else None
+        if record is None:  # No exact match - fall back to search, preferring a result with a close duration
+            response = requests.get("https://lrclib.net/api/search", headers=headers, timeout=10,
+                                    params={"artist_name": song.artist, "track_name": song.title})
+            results = response.json() if response.status_code == 200 else []
+            if song.duration:
+                results = [r for r in results if abs((r.get("duration") or 0) * 1000 - song.duration) <= 5000] or results
+            record = next((r for r in results if r.get("syncedLyrics")), None) or next(
+                (r for r in results if r.get("plainLyrics") or r.get("instrumental")), None)
+    except (requests.exceptions.RequestException, ValueError) as e:
+        print(f"LRCLIB request failed: {e!r}")
+        return None
+
+    if not record:
+        return None
+
+    song.is_instrumental = bool(record.get("instrumental"))
+    synced = parse_lrc(record["syncedLyrics"], song.duration) if record.get("syncedLyrics") else None
+    plain = list(filter(None, record["plainLyrics"].split("\n"))) if record.get("plainLyrics") else None
+    song.has_synced = synced is not None
+    song.has_unsynced = plain is not None
+    if not (synced or plain or song.is_instrumental):
+        return None
+    return {"synced_lyrics": synced, "lyrics": plain, "song_info": song.get_info()}
+
+
+def normalize_name(text):
+    text = re.split(r" - |\(|\[", text or "")[0]  # drop " - Remastered", "(feat. ...)" etc.
+    return re.sub(r"[^\w]+", " ", text.lower()).strip()
+
+
+def is_same_song(requested_artist, requested_title, found_artist, found_title):
+    req_t, found_t = normalize_name(requested_title), normalize_name(found_title)
+    req_a, found_a = normalize_name(requested_artist), normalize_name(found_artist)
+    title_ok = bool(req_t and found_t) and (req_t in found_t or found_t in req_t)
+    artist_ok = bool(req_a and found_a) and (req_a.split(" ")[0] in found_a or found_a.split(" ")[0] in req_a)
+    return title_ok and artist_ok
 
 
 def spotifyapi_get_playing(access_token):
@@ -237,30 +296,29 @@ def spotifyapi_refresh_token():
         print(f"\033[90mCode {response.status_code}: {response.reason}\033[0m")
         with contextlib.suppress(json.decoder.JSONDecodeError):
             print(f"\033[90m{response.json()}\033[0m")
-        print("Spotify token refreshed")
+        if response.status_code != 200 or "access_token" not in response.json():
+            error = response.json().get("error_description", response.reason) if response.content else response.reason
+            print(f"\033[91m[ERROR] Spotify token refresh failed: {error}\033[0m")
+            print("Your SPOTIFY_REFRESH_TOKEN (or SPOTIFY_BASE64_TOKEN) is invalid. Generate a new refresh token "
+                  "(see README > Spotify Tokens) and update .env")
+            sys.exit(1)
 
+        print("Spotify token refreshed")
         return response.json()["access_token"]
     except requests.exceptions.ConnectionError:
         print("\033[91m[ERROR] Connection Failed - Check internet connection\033[0m")
         print("Retrying in 10 seconds...")
-        time.sleep(1000)
-        spotifyapi_refresh_token()
+        time.sleep(10)
+        return spotifyapi_refresh_token()
 
 
-async def get_media_info():
-    sessions = await MediaManager.request_async()
-
-    if current_session := sessions.get_current_session():
-        print(current_session.source_app_user_model_id)
-        if current_session.source_app_user_model_id in ["Chrome", "Spotify.exe"]:
-            info = await current_session.try_get_media_properties_async()
-
-            info_dict = {song_attr: info.__getattribute__(song_attr) for song_attr in dir(info) if song_attr[0] != '_'}  # song_attr[0] != '_' ignores system attributes
-            info_dict["genres"] = list(info_dict["genres"])  # Convert winsdk vector to list
-
-            print(info_dict)
-            return info_dict
-    return None
+def control_locally(action):
+    """Try play/pause/next/previous on this computer (works without Premium). Returns True if handled."""
+    # noinspection PyUnresolvedReferences
+    if track_info is None or not platform_support.is_playing_locally(track_info["track_name"]):
+        return False
+    print(f"Sending {action} directly from device...")
+    return platform_support.send_media_command(action)
 
 
 class Song(object):
@@ -296,16 +354,19 @@ class Song(object):
         meta = body["matcher.track.get"]["message"]["body"]
         if not meta:
             return
+        track = meta["track"]
+        # Musixmatch may omit any of these fields (e.g. album_coverart_* was dropped), so read them defensively
         coverart_sizes = ["100x100", "350x350", "500x500", "800x800"]
-        coverart_urls = list(filter(None, [meta["track"][f"album_coverart_{size}"] for size in coverart_sizes]))
+        coverart_urls = list(filter(None, [track.get(f"album_coverart_{size}") for size in coverart_sizes]))
         self.coverart_url = coverart_urls[-1] if coverart_urls else None
-        self.title = meta["track"]["track_name"]
-        self.artist = meta["track"]["artist_name"]
-        self.album = meta["track"]["album_name"]
-        self.duration = meta["track"]["track_length"] * 1000
-        self.has_synced = meta["track"]["has_subtitles"]
-        self.has_unsynced = meta["track"]["has_lyrics"]  # or meta["track"]["has_lyrics_crowd"]
-        self.is_instrumental = meta["track"]["instrumental"]
+        self.title = track.get("track_name", self.title)
+        self.artist = track.get("artist_name", self.artist)
+        self.album = track.get("album_name", self.album)
+        if track.get("track_length"):
+            self.duration = track["track_length"] * 1000
+        self.has_synced = track.get("has_subtitles", 0)
+        self.has_unsynced = track.get("has_lyrics", 0)  # or track["has_lyrics_crowd"]
+        self.is_instrumental = track.get("instrumental", 0)
 
 
 def round_rectangle_points(x1, y1, x2, y2, radius=25):  # Generating points for a rounded rectangle
@@ -363,14 +424,14 @@ def make_api_call(spotify_access_token, code_directory):
             "returns_received": False
         }
 
-    with open(f"{code_directory}\\api_data.json", "w+") as file:
+    with open(os.path.join(code_directory, "api_data.json"), "w+") as file:
         json.dump(returns, file, indent=4)
     return
 
 
 def get_api_data():
     try:
-        with open(f"{code_directory}\\api_data.json", "r+") as file:
+        with open(os.path.join(code_directory, "api_data.json"), "r+") as file:
             data = json.load(file)
     except json.decoder.JSONDecodeError:  # Occurs during the time when file is being written to
         time.sleep(0.1)
@@ -797,7 +858,7 @@ def updater():  # sourcery skip: low-code-quality
 
     if api_data != {} and not api_data["returns_received"]:
         # Set returns_received to True to retrieve file after every update
-        with open(f"{code_directory}\\api_data.json", "r+") as file:
+        with open(os.path.join(code_directory, "api_data.json"), "r+") as file:
             data = json.load(file)
             data["returns_received"] = True
             file.seek(0)
@@ -921,7 +982,10 @@ def updater():  # sourcery skip: low-code-quality
 
             root.update()
 
-            lyrics = get_lyrics(Song(track_info["artist_names"], track_info["track_name"]))
+            current_song = Song(track_info["artists"][0] if track_info.get("artists") else track_info["artist_names"],
+                                track_info["track_name"], album=track_info.get("album", ""), uri=track_info.get("uri", ""))
+            current_song.duration = track_info.get("duration_ms") or 0
+            lyrics = get_lyrics(current_song)
             print(f"\033[90m{lyrics}\033[0m")
 
             lyrics_center_subtitle.config(text="")
@@ -1079,8 +1143,7 @@ if __name__ == "__main__":
     root.title("Spotify Surface")
 
     root.config(background="#f0f0f0")  # Previously: white
-    root.attributes("-transparentcolor", "grey")
-    root.wm_attributes("-transparentcolor", "grey")
+    platform_support.apply_window_transparency(root, "grey")
 
     sv_ttk.set_theme("light")
 
@@ -1095,7 +1158,7 @@ if __name__ == "__main__":
     # Default window size
     geometry = (250, 325)
 
-    taskbar_offset = 60  # Taskbar size is 60 pixels
+    taskbar_offset = platform_support.bottom_screen_offset(monitor_height)  # Taskbar / Dock / panel height
 
     # Set window size and move to bottom right
     root.geometry(f"{geometry[0]}x{geometry[1]}+{monitor_width - geometry[0]}+{monitor_height - geometry[1] - taskbar_offset}")
@@ -1169,7 +1232,7 @@ if __name__ == "__main__":
             print("Terminated multiprocessing thread")
         # Clear json file
         print("Clearing API data file")
-        with open(f"{code_directory}\\api_data.json", "w+") as file:
+        with open(os.path.join(code_directory, "api_data.json"), "w+") as file:
             json.dump({}, file, indent=4)
         # Destroy root and exit
         print("Destroying root and exiting...")
@@ -1323,15 +1386,8 @@ if __name__ == "__main__":
         frame_playbackbuttons.config(cursor="")
 
     def backward_button_on_click():
-        # Playing on current device
-        current_media_info = asyncio.run(get_media_info())
-        print(f"Reading current media info: {current_media_info}")
-        # noinspection PyUnresolvedReferences
-        if current_media_info is not None and track_info is not None and current_media_info["title"] == track_info["track_name"]:
-            print("Sending previous track keypress directly from device...")
-            win32api.keybd_event(win32con.VK_MEDIA_PREV_TRACK, 0, win32con.KEYEVENTF_EXTENDEDKEY, 0)  # Next track button, from numerical keypad
-        # Not playing on current device
-        else:
+        # Playing on current device -> control it directly; otherwise use the Spotify Web API
+        if not control_locally("previous"):
             print("Sending request to play previous song...")
             response = requests.post("https://api.spotify.com/v1/me/player/previous",
                                      headers={"Authorization": f"Bearer {spotify_access_token}"})
@@ -1370,15 +1426,8 @@ if __name__ == "__main__":
         frame_playbackbuttons.config(cursor="")
 
     def play_button_on_click():
-        # Playing on current device
-        current_media_info = asyncio.run(get_media_info())
-        print(f"Reading current media info: {current_media_info}")
-        # noinspection PyUnresolvedReferences
-        if current_media_info is not None and track_info is not None and current_media_info["title"] == track_info["track_name"]:
-            print("Sending play/pause track keypress directly from device...")
-            win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, win32con.KEYEVENTF_EXTENDEDKEY, 0)  # Play/Pause button, from numerical keypad
-        # Not playing on current device
-        else:
+        # Playing on current device -> control it directly; otherwise use the Spotify Web API
+        if not control_locally("play_pause"):
             if playing:  # Currently playing, pause playback
                 print("Currently playing, pausing playback...")
                 response = requests.put("https://api.spotify.com/v1/me/player/pause",
@@ -1433,15 +1482,8 @@ if __name__ == "__main__":
         frame_playbackbuttons.config(cursor="")
 
     def forward_button_on_click():
-        # Playing on current device
-        current_media_info = asyncio.run(get_media_info())
-        print(f"Reading current media info: {current_media_info}")
-        # noinspection PyUnresolvedReferences
-        if current_media_info is not None and track_info is not None and current_media_info["title"] == track_info["track_name"]:
-            print("Sending next track keypress directly from device...")
-            win32api.keybd_event(win32con.VK_MEDIA_NEXT_TRACK, 0, win32con.KEYEVENTF_EXTENDEDKEY, 0)  # Next track button, from numerical keypad
-        # Not playing on current device
-        else:
+        # Playing on current device -> control it directly; otherwise use the Spotify Web API
+        if not control_locally("next"):
             print("Sending request to play next song...")
             response = requests.post("https://api.spotify.com/v1/me/player/next",
                                      headers={"Authorization": f"Bearer {spotify_access_token}"})

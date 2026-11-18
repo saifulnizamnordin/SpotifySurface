@@ -1,2 +1,4 @@
 .env
 api_data.json
+__pycache__
+.pytest_cache
