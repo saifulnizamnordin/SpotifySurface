@@ -2,11 +2,16 @@ name: Tests
 
 on:
   push:
+    branches: [master]  # PR branches are covered by pull_request - avoids running every commit twice
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:  # A new push cancels the previous run for the same branch/PR
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -15,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        # macOS runners are scarce and often queue for a long time. The macOS code paths are still
+        # tested on these runners with mocked osascript/pgrep (tests/test_platform_support.py).
+        os: [windows-latest, ubuntu-latest]
         python-version: ["3.10"]  # Matches the pinned dependencies in requirements.txt
 
     steps:
